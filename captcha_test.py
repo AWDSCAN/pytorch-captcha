@@ -69,28 +69,32 @@ def main():
             
             # 将预测结果移回CPU进行处理
             predict_label_cpu = predict_label.cpu()
-
-            c0 = captcha_setting.ALL_CHAR_SET[np.argmax(predict_label_cpu[0, 0:captcha_setting.ALL_CHAR_SET_LEN].data.numpy())]
-            c1 = captcha_setting.ALL_CHAR_SET[np.argmax(predict_label_cpu[0, captcha_setting.ALL_CHAR_SET_LEN:2 * captcha_setting.ALL_CHAR_SET_LEN].data.numpy())]
-            c2 = captcha_setting.ALL_CHAR_SET[np.argmax(predict_label_cpu[0, 2 * captcha_setting.ALL_CHAR_SET_LEN:3 * captcha_setting.ALL_CHAR_SET_LEN].data.numpy())]
-            c3 = captcha_setting.ALL_CHAR_SET[np.argmax(predict_label_cpu[0, 3 * captcha_setting.ALL_CHAR_SET_LEN:4 * captcha_setting.ALL_CHAR_SET_LEN].data.numpy())]
-            predict_label_str = '%s%s%s%s' % (c0, c1, c2, c3)
-            true_label = one_hot_encoding.decode(labels.numpy()[0])
-            total += labels.size(0)
+            labels_cpu = labels.cpu().numpy()
             
-            if predict_label_str == true_label:
-                correct += 1
-            else:
-                error_samples.append((true_label, predict_label_str))
+            # 遍历batch中的每个样本
+            batch_size = labels.size(0)
+            for idx in range(batch_size):
+                c0 = captcha_setting.ALL_CHAR_SET[np.argmax(predict_label_cpu[idx, 0:captcha_setting.ALL_CHAR_SET_LEN].data.numpy())]
+                c1 = captcha_setting.ALL_CHAR_SET[np.argmax(predict_label_cpu[idx, captcha_setting.ALL_CHAR_SET_LEN:2 * captcha_setting.ALL_CHAR_SET_LEN].data.numpy())]
+                c2 = captcha_setting.ALL_CHAR_SET[np.argmax(predict_label_cpu[idx, 2 * captcha_setting.ALL_CHAR_SET_LEN:3 * captcha_setting.ALL_CHAR_SET_LEN].data.numpy())]
+                c3 = captcha_setting.ALL_CHAR_SET[np.argmax(predict_label_cpu[idx, 3 * captcha_setting.ALL_CHAR_SET_LEN:4 * captcha_setting.ALL_CHAR_SET_LEN].data.numpy())]
+                predict_label_str = '%s%s%s%s' % (c0, c1, c2, c3)
+                true_label = one_hot_encoding.decode(labels_cpu[idx])
+                total += 1
                 
-                # 分析每个字符的错误
-                for pos, (true_char, pred_char) in enumerate(zip(true_label, predict_label_str)):
-                    if true_char != pred_char:
-                        char_errors[f"{true_char}->{pred_char}"] += 1
-                        position_errors[pos] += 1
-                
-                if len(error_samples) <= 10:
-                    print(f"\n错误识别: 真实={true_label}, 预测={predict_label_str}")
+                if predict_label_str == true_label:
+                    correct += 1
+                else:
+                    error_samples.append((true_label, predict_label_str))
+                    
+                    # 分析每个字符的错误
+                    for pos, (true_char, pred_char) in enumerate(zip(true_label, predict_label_str)):
+                        if true_char != pred_char:
+                            char_errors[f"{true_char}->{pred_char}"] += 1
+                            position_errors[pos] += 1
+                    
+                    if len(error_samples) <= 10:
+                        print(f"\n错误识别: 真实={true_label}, 预测={predict_label_str}")
             
             # 更新进度条
             if HAS_TQDM:
