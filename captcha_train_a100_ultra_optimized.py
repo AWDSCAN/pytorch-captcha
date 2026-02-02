@@ -1,11 +1,12 @@
 # -*- coding: UTF-8 -*-
 """
-A100超级优化训练脚本 - 充分利用多GPU算力
+A100超级优化训练脚本 - 极限利用多GPU算力
 - 使用DistributedDataParallel（DDP）替代DataParallel（更高效）
-- 大batch size（512）充分利用显存
+- 超大batch size（1024）极限利用120GB显存
 - 优化数据加载（多线程、pin_memory、预加载）
 - 混合精度训练（AMP）
 - TF32加速
+- Warmup + Cosine学习率调度
 """
 import torch
 import torch.nn as nn
@@ -19,12 +20,38 @@ import my_dataset
 from captcha_cnn_model import CNN
 import time
 import os
+import captcha_setting
+from torch.utils.data import DataLoader
+import torchvision.transforms as transforms
+from PIL import Image
+import one_hot_encoding as ohe
+import math
 
-# 超参数 - 充分利用多GPU算力
+# 超参数 - 极限利用3×A100（120GB总显存）
 num_epochs = 150
-batch_size = 512  # 每个GPU的batch_size（总batch=512*3=1536）
-learning_rate = 0.0002
-num_workers = 12  # 数据加载线程数
+batch_size = 1024  # 每个GPU的batch_size（总batch=1024×3=3072）
+base_learning_rate = 0.0006  # 0.0002×3，保持与batch_size的线性比例
+warmup_epochs = 5  # Warmup轮数（大batch需要warmup避免训练初期不稳定）
+weight_decay = 1e-4  # L2正则化，防止大batch过拟合
+num_workers = 16  # 数据加载线程数（更大batch需要更多worker）
+
+# 自定义数据集类（必须在全局作用域以支持多进程pickle）
+class CaptchaDataset(torch.utils.data.Dataset):
+    def __init__(self, folder, transform=None):
+        self.train_image_file_paths = [os.path.join(folder, f) for f in os.listdir(folder)]
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.train_image_file_paths)
+
+    def __getitem__(self, idx):
+        image_root = self.train_image_file_paths[idx]
+        image_name = image_root.split(os.path.sep)[-1]
+        image = Image.open(image_root)
+        if self.transform is not None:
+            image = self.transform(image)
+        label = ohe.encode(image_name.split('_')[0])
+        return image, label
 
 def setup_ddp(rank, world_size):
     """初始化DDP"""
@@ -53,44 +80,26 @@ def train_ddp(rank, world_size):
     model = CNN().to(rank)
     model = DDP(model, device_ids=[rank])
     
-    # 优化器和调度器
+    # 优化器和损失函数
     criterion = nn.MultiLabelSoftMarginLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
+    optimizer = torch.optim.AdamW(  # AdamW更适合大batch训练
+        model.parameters(), 
+        lr=base_learning_rate,
+        weight_decay=weight_decay,
+        betas=(0.9, 0.999),
+        eps=1e-8
+    )
     
-    # 混合精度训练
-    scaler = GradScaler()
+    # 混合精度训练（使用新的API）
+    scaler = GradScaler('cuda')
     
     # 数据加载器（使用DistributedSampler）
-    import captcha_setting
-    from torch.utils.data import DataLoader
-    import torchvision.transforms as transforms
-    from PIL import Image
-    import one_hot_encoding as ohe
-    
-    class mydataset(torch.utils.data.Dataset):
-        def __init__(self, folder, transform=None):
-            self.train_image_file_paths = [os.path.join(folder, f) for f in os.listdir(folder)]
-            self.transform = transform
-
-        def __len__(self):
-            return len(self.train_image_file_paths)
-
-        def __getitem__(self, idx):
-            image_root = self.train_image_file_paths[idx]
-            image_name = image_root.split(os.path.sep)[-1]
-            image = Image.open(image_root)
-            if self.transform is not None:
-                image = self.transform(image)
-            label = ohe.encode(image_name.split('_')[0])
-            return image, label
-    
     transform = transforms.Compose([
         transforms.Grayscale(),
         transforms.ToTensor(),
     ])
     
-    dataset = mydataset(captcha_setting.TRAIN_DATASET_PATH, transform=transform)
+    dataset = CaptchaDataset(captcha_setting.TRAIN_DATASET_PATH, transform=transform)
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
     
     train_dataloader = DataLoader(
@@ -103,16 +112,25 @@ def train_ddp(rank, world_size):
         prefetch_factor=2
     )
     
+    # 计算总训练步数
+    total_steps = len(train_dataloader) * num_epochs
+    warmup_steps = len(train_dataloader) * warmup_epochs
+    
     if rank == 0:
         print(f"\n{'='*80}")
         print("DDP训练配置:")
         print(f"  GPU数量: {world_size}")
         print(f"  每GPU Batch大小: {batch_size}")
         print(f"  总Batch大小: {batch_size * world_size}")
+        print(f"  基础学习率: {base_learning_rate}")
+        print(f"  Warmup轮数: {warmup_epochs}")
+        print(f"  Weight Decay: {weight_decay}")
         print(f"  数据加载线程: {num_workers} (每GPU)")
         print(f"  总训练样本: {len(dataset)}")
         print(f"  每轮步数: {len(train_dataloader)}")
         print(f"  总轮数: {num_epochs}")
+        print(f"  总训练步数: {total_steps}")
+        print(f"  Warmup步数: {warmup_steps}")
         print(f"{'='*80}\n")
     
     # 训练循环
@@ -124,6 +142,7 @@ def train_ddp(rank, world_size):
     
     model.train()
     train_start = time.time()
+    global_step = 0  # 全局步数计数器
     
     for epoch in range(num_epochs):
         sampler.set_epoch(epoch)  # 重要：确保每个epoch的shuffle不同
@@ -140,6 +159,18 @@ def train_ddp(rank, world_size):
             images = images.to(rank, non_blocking=True)
             labels = labels.float().to(rank, non_blocking=True)
             
+            # 动态学习率调度：Warmup + Cosine Annealing
+            if global_step < warmup_steps:
+                # Warmup阶段：线性增长
+                lr = base_learning_rate * (global_step + 1) / warmup_steps
+            else:
+                # Cosine Annealing阶段
+                progress = (global_step - warmup_steps) / (total_steps - warmup_steps)
+                lr = 1e-6 + (base_learning_rate - 1e-6) * 0.5 * (1 + math.cos(math.pi * progress))
+            
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr
+            
             optimizer.zero_grad()
             
             # 混合精度前向传播
@@ -153,6 +184,7 @@ def train_ddp(rank, world_size):
             scaler.update()
             
             epoch_loss += loss.item()
+            global_step += 1
             
             # 更新进度条
             if rank == 0 and HAS_TQDM:
@@ -172,8 +204,6 @@ def train_ddp(rank, world_size):
         
         if rank == 0 and HAS_TQDM:
             pbar.close()
-        
-        scheduler.step()
         
         # Epoch统计
         avg_loss = epoch_loss / len(train_dataloader)
@@ -231,14 +261,19 @@ def main():
         print("错误：未检测到GPU")
         return
     
+    total_memory_gb = sum(torch.cuda.get_device_properties(i).total_memory for i in range(world_size)) / 1024**3
     print("=" * 80)
-    print("A100超级优化训练 - DistributedDataParallel")
+    print("A100极限优化训练 - DistributedDataParallel")
     print("=" * 80)
-    print(f"检测到 {world_size} 张GPU")
+    print(f"检测到 {world_size} 张GPU（总显存: {total_memory_gb:.1f} GB）")
     for i in range(world_size):
         print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
         print(f"    显存: {torch.cuda.get_device_properties(i).total_memory / 1024**3:.2f} GB")
-    print(f"总Batch大小: {batch_size} × {world_size} = {batch_size * world_size}")
+    print(f"\n极限配置:")
+    print(f"  每GPU Batch: {batch_size}")
+    print(f"  总Batch大小: {batch_size} × {world_size} = {batch_size * world_size}")
+    print(f"  基础学习率: {base_learning_rate}")
+    print(f"  Warmup轮数: {warmup_epochs}")
     print("=" * 80 + "\n")
     
     # 启动DDP训练
