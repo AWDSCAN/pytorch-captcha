@@ -176,9 +176,9 @@ def gen_captcha_text_and_image(mode='mixed'):
 
 if __name__ == '__main__':
     # 配置参数
-    count = 100  # 生成数量
+    count = 1000  # 生成数量
     mode = 'mixed'  # 生成模式: 'simple', 'custom', 'mixed'
-    path = captcha_setting.TRAIN_DATASET_PATH  # 通过改变此处目录，以生成训练、测试和预测用的验证码集
+    path = captcha_setting.TEST_DATASET_PATH  # 通过改变此处目录，以生成训练、测试和预测用的验证码集
     
     print("=" * 60)
     print("验证码生成器")

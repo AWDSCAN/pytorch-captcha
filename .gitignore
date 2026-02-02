@@ -49,7 +49,9 @@ coverage.xml
 # Translations
 *.mo
 *.pot
-
+docs/
+models/
+dataset/
 # Django stuff:
 *.log
 local_settings.py
