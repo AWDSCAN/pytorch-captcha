@@ -1,0 +1,13 @@
+# 基础依赖
+torch>=2.0.0
+torchvision>=0.15.0
+captcha>=0.4
+Pillow>=9.0.0
+numpy>=1.21.0
+
+# 可视化依赖（推荐安装）
+tqdm>=4.65.0          # 进度条
+matplotlib>=3.5.0     # 训练曲线绘制
+
+# 可选依赖
+# tensorboard>=2.12.0  # TensorBoard可视化（高级用户）
