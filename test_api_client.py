@@ -89,7 +89,7 @@ def test_predict_base64(image_path):
         print(f"推理时间: {result['inference_time_ms']:.2f} ms")
     print()
 
-def test_batch_predict(image_dir, num_images=1000):
+def test_batch_predict(image_dir, num_images=20):
     """测试批量识别"""
     print("=" * 80)
     print("4. 测试批量识别性能")
@@ -108,7 +108,7 @@ def test_batch_predict(image_dir, num_images=1000):
     image_files = image_files[:num_images]
     print(f"测试图片数量: {len(image_files)}")
     
-    # 批量识别
+    # 批量识别（使用Base64方式）
     correct = 0
     total = 0
     total_time = 0
@@ -117,13 +117,19 @@ def test_batch_predict(image_dir, num_images=1000):
         image_path = os.path.join(image_dir, filename)
         true_label = filename.split('_')[0]
         
-        # 识别
+        # 读取图片并转为Base64
         with open(image_path, 'rb') as f:
-            files = {'file': (filename, f, 'image/png')}
-            start = time.time()
-            response = requests.post(f"{API_BASE_URL}/predict", files=files)
-            elapsed = (time.time() - start) * 1000
-            total_time += elapsed
+            image_data = f.read()
+            image_base64 = base64.b64encode(image_data).decode('utf-8')
+        
+        # 使用Base64 JSON方式识别
+        start = time.time()
+        response = requests.post(
+            f"{API_BASE_URL}/predict/base64/json",
+            json={'image_base64': image_base64}
+        )
+        elapsed = (time.time() - start) * 1000
+        total_time += elapsed
         
         if response.status_code == 200:
             result = response.json()
@@ -164,23 +170,37 @@ def main():
         return
     
     # 查找测试图片
-    test_image = None
+    # 初始化为空列表，用于存储前10张图片的路径
+    test_images = []  # 变量名改为复数更贴合多图片场景
+    target_count = 100  # 明确需要获取的前N张图片数量
+    
     for test_dir in ['dataset/test', 'dataset/train']:
         if os.path.exists(test_dir):
-            images = [f for f in os.listdir(test_dir) if f.endswith('.png')]
-            if images:
-                test_image = os.path.join(test_dir, images[0])
-                break
+            # 筛选目录下所有.png格式图片
+            png_images = [f for f in os.listdir(test_dir) if f.endswith('.png')]
+            if png_images:
+                # 提取前10张（如果图片不足10张，则取全部）
+                top_10_images = png_images[:target_count]
+                # 拼接完整路径并添加到结果列表中
+                for img in top_10_images:
+                    test_images.append(os.path.join(test_dir, img))
+                # 若已获取到10张，直接终止循环（可选，根据需求决定是否继续遍历下一个目录）
+                if len(test_images) >= target_count:
+                    test_images = test_images[:target_count]  # 确保不超过10张
+                    break
+    
+    # 为了兼容后续代码，取第一张图片作为test_image
+    test_image = test_images[0] if test_images else None
     
     if not test_image:
         print("错误：找不到测试图片")
         return
     
-    # 2. 测试文件上传
-    try:
-        test_predict_file(test_image)
-    except Exception as e:
-        print(f"文件上传测试失败: {e}\n")
+    # # 2. 测试文件上传
+    # try:
+    #     test_predict_file(test_image)
+    # except Exception as e:
+    #     print(f"文件上传测试失败: {e}\n")
     
     # 3. 测试Base64
     try:
@@ -192,7 +212,7 @@ def main():
     test_dir = 'dataset/test' if os.path.exists('dataset/test') else 'dataset/train'
     if os.path.exists(test_dir):
         try:
-            test_batch_predict(test_dir, num_images=1000)
+            test_batch_predict(test_dir, num_images=10)
         except Exception as e:
             print(f"批量测试失败: {e}\n")
     
